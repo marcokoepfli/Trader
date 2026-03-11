@@ -59,7 +59,7 @@ class BotStartCommand extends Command
             $this->error('⚠ ACHTUNG: LIVE-MODUS AKTIV — Echtes Geld wird riskiert!');
         }
 
-        if (! $this->confirm('Bot starten?', false)) {
+        if ($this->input->isInteractive() && ! $this->confirm('Bot starten?', false)) {
             $this->info('Abgebrochen.');
 
             return self::SUCCESS;
