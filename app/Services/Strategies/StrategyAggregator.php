@@ -3,6 +3,7 @@
 namespace App\Services\Strategies;
 
 use App\DTOs\SignalDTO;
+use App\Models\BotState;
 use App\Models\StrategyScore;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
@@ -33,6 +34,19 @@ class StrategyAggregator
         $signals = [];
         $minScore = config('trading.strategy.min_score_to_trade');
 
+        // Session-Filter: Nur in London + Overlap + NY handeln
+        $session = $candles->last()['session'] ?? 'unknown';
+        $pair = ''; // Pair wird vom Caller geprüft
+
+        if (config('trading.session_filter.enabled', true)) {
+            $allowedSessions = config('trading.session_filter.allowed_sessions', ['london', 'overlap', 'newyork']);
+            if (! in_array($session, $allowedSessions)) {
+                $log->debug("[SIGNAL] Session-Filter: {$session} nicht erlaubt — übersprungen");
+
+                return null;
+            }
+        }
+
         foreach ($this->strategies as $strategy) {
             $name = $strategy->getName();
 
@@ -45,6 +59,15 @@ class StrategyAggregator
 
             $currentScore = $score ? $score->score : 0.5;
             if ($currentScore < $minScore) {
+                continue;
+            }
+
+            // Adaptive: Strategie in bestimmter Marktbedingung vermeiden
+            $avoidCondition = BotState::getValue("avoid_condition_{$name}");
+            $marketCondition = $indicators['market_condition'] ?? 'ranging';
+            if ($avoidCondition && $avoidCondition === $marketCondition) {
+                $log->debug("[SIGNAL] {$name} vermeidet {$marketCondition} Markt (adaptiv)");
+
                 continue;
             }
 
@@ -62,11 +85,22 @@ class StrategyAggregator
         $buySignals = array_filter($signals, fn ($s) => $s['signal']->direction === 'BUY');
         $sellSignals = array_filter($signals, fn ($s) => $s['signal']->direction === 'SELL');
 
+        // Korrelations-Widerspruch erkennen: BUY + SELL gleichzeitig = unsicherer Markt
+        if (count($buySignals) > 0 && count($sellSignals) > 0) {
+            $log->info(sprintf(
+                '[SIGNAL] Widersprüchliche Signale — %d BUY vs %d SELL — übersprungen (unsicherer Markt)',
+                count($buySignals),
+                count($sellSignals),
+            ));
+
+            return null;
+        }
+
         $minConfluence = config('trading.strategy.min_confluence');
 
         // Beste Richtung wählen (mehr Confluence)
         $bestGroup = null;
-        if (count($buySignals) >= $minConfluence && count($buySignals) >= count($sellSignals)) {
+        if (count($buySignals) >= $minConfluence) {
             $bestGroup = $buySignals;
         } elseif (count($sellSignals) >= $minConfluence) {
             $bestGroup = $sellSignals;
@@ -81,6 +115,14 @@ class StrategyAggregator
             ));
 
             return null;
+        }
+
+        // Strikter H4-Trend Filter: NICHT gegen den H4-Trend handeln
+        if (config('trading.h4_trend_filter.enabled', true) && ! empty($higherTfIndicators)) {
+            $direction = $bestGroup === $buySignals ? 'BUY' : 'SELL';
+            if (! $this->confirmH4Trend($direction, $higherTfIndicators, $log)) {
+                return null;
+            }
         }
 
         // Gewichteten Confidence-Score berechnen
@@ -116,5 +158,50 @@ class StrategyAggregator
             takeProfit: $best->takeProfit,
             reasoning: implode(' | ', array_map(fn ($s) => $s['signal']->reasoning, $bestGroup)),
         );
+    }
+
+    /**
+     * H4-Trend bestätigen: NIE gegen den übergeordneten Trend handeln
+     */
+    private function confirmH4Trend(string $direction, array $h4Indicators, $log): bool
+    {
+        $h4Ema50 = $h4Indicators['ema_50']['value'] ?? null;
+        $h4Sma200 = $h4Indicators['sma_200']['value'] ?? null;
+        $h4Macd = $h4Indicators['macd'] ?? null;
+
+        if (! $h4Ema50) {
+            return true; // Keine H4-Daten → nicht blockieren
+        }
+
+        // Preis muss auf der richtigen Seite der H4 EMA50 sein
+        $h4Close = $h4Indicators['ema_50']['value'] ?? null; // EMA als Referenz
+
+        // H4 EMA50 + SMA200 Ausrichtung prüfen
+        if ($h4Sma200) {
+            if ($direction === 'BUY' && $h4Ema50 < $h4Sma200) {
+                $log->info('[SIGNAL] H4-Trend Filter: BUY blockiert — EMA50 < SMA200 (Abwärtstrend)');
+
+                return false;
+            }
+            if ($direction === 'SELL' && $h4Ema50 > $h4Sma200) {
+                $log->info('[SIGNAL] H4-Trend Filter: SELL blockiert — EMA50 > SMA200 (Aufwärtstrend)');
+
+                return false;
+            }
+        }
+
+        // H4 MACD-Bestätigung
+        if ($h4Macd) {
+            $h4MacdHistogram = $h4Macd['histogram'] ?? 0;
+            if ($direction === 'BUY' && $h4MacdHistogram < 0) {
+                $log->debug('[SIGNAL] H4-Trend: MACD bearish — BUY-Confidence reduziert');
+                // Nicht blockieren, aber in Log vermerken
+            }
+            if ($direction === 'SELL' && $h4MacdHistogram > 0) {
+                $log->debug('[SIGNAL] H4-Trend: MACD bullish — SELL-Confidence reduziert');
+            }
+        }
+
+        return true;
     }
 }

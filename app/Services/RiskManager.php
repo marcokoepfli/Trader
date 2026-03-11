@@ -48,6 +48,26 @@ class RiskManager
             ));
         }
 
+        // Drawdown-Recovery: Positionsgrösse reduzieren nach Drawdown
+        if (config('trading.risk.drawdown_recovery')) {
+            $peakBalance = BotState::getPeakBalance();
+            if ($peakBalance > 0 && $balance < $peakBalance) {
+                $drawdown = ($peakBalance - $balance) / $peakBalance;
+                if ($drawdown >= 0.05) {
+                    // Pro 5% Drawdown: 25% weniger Risiko, min 30% des Originals
+                    $reductionFactor = max(0.3, 1 - ($drawdown / 0.05) * 0.25);
+                    $baseRisk *= $reductionFactor;
+
+                    Log::channel('trading')->info(sprintf(
+                        '[RISK] Drawdown-Recovery: %.1f%% DD → Risiko reduziert auf %.2f%% (Faktor %.2f)',
+                        $drawdown * 100,
+                        $baseRisk * 100,
+                        $reductionFactor,
+                    ));
+                }
+            }
+        }
+
         $riskAmount = $balance * $baseRisk;
         $pipDistance = abs($entry - $sl);
 
@@ -106,14 +126,25 @@ class RiskManager
             }
         }
 
-        // Risk/Reward prüfen
+        // Risk/Reward prüfen (mit Spread-Kosten)
         $rr = $signal->riskRewardRatio();
-        if ($rr < config('trading.risk.min_rr_ratio')) {
+        if (isset($spreadPips)) {
+            $pipSize = str_contains($pair, 'JPY') ? 0.01 : 0.0001;
+            $spreadCost = $spreadPips * $pipSize;
+            $risk = abs($signal->entryPrice - $signal->stopLoss);
+            $reward = abs($signal->takeProfit - $signal->entryPrice) - $spreadCost;
+            $adjustedRr = $risk > 0 ? $reward / $risk : 0;
+
+            if ($adjustedRr < config('trading.risk.min_rr_ratio')) {
+                $failures[] = sprintf('R:R zu niedrig (spread-bereinigt): %.2f (min: %.1f)', $adjustedRr, config('trading.risk.min_rr_ratio'));
+            }
+        } elseif ($rr < config('trading.risk.min_rr_ratio')) {
             $failures[] = sprintf('R:R zu niedrig: %.2f (min: %.1f)', $rr, config('trading.risk.min_rr_ratio'));
         }
 
         // Korrelierte Paare prüfen
-        $openPairs = Trade::open()->pluck('pair')->toArray();
+        $openTrades = Trade::open()->get();
+        $openPairs = $openTrades->pluck('pair')->toArray();
         foreach (config('trading.correlated_pairs', []) as $group) {
             if (in_array($pair, $group)) {
                 foreach ($group as $correlated) {
@@ -122,6 +153,27 @@ class RiskManager
                         break;
                     }
                 }
+            }
+        }
+
+        // Korrelations-Hedging: Prüfe ob korrelierte Trades in widersprüchliche Richtungen gehen
+        foreach ($openTrades as $openTrade) {
+            $isCorrelated = false;
+            foreach (config('trading.correlated_pairs', []) as $group) {
+                if (in_array($pair, $group) && in_array($openTrade->pair, $group)) {
+                    $isCorrelated = true;
+                    break;
+                }
+            }
+
+            if ($isCorrelated && $openTrade->direction !== $signal->direction) {
+                $failures[] = sprintf(
+                    'Korrelations-Hedging: %s ist %s, neues Signal %s %s widerspricht',
+                    $openTrade->pair,
+                    $openTrade->direction,
+                    $pair,
+                    $signal->direction,
+                );
             }
         }
 

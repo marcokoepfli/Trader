@@ -20,18 +20,21 @@ return [
 
         // Dynamische Positionsgrösse basierend auf Confidence
         'dynamic_sizing' => true,
-        'min_confidence_risk_pct' => 0.5, // 50% des Risikos bei niedrigster Confidence
-        'max_confidence_risk_pct' => 1.0, // 100% des Risikos bei höchster Confidence
+        'min_confidence_risk_pct' => 0.5,
+        'max_confidence_risk_pct' => 1.0,
         'confidence_threshold_low' => 0.5,
         'confidence_threshold_high' => 0.85,
+
+        // Drawdown-Recovery: Risiko automatisch reduzieren nach Verlusten
+        'drawdown_recovery' => true,
     ],
 
     // Partial Take Profit
     'partial_tp' => [
         'enabled' => true,
-        'close_pct' => 0.5, // 50% der Position bei 1:1 R:R schliessen
-        'trigger_rr' => 1.0, // Bei 1:1 R:R auslösen
-        'move_sl_to_breakeven' => true, // SL auf Einstand nach Partial Close
+        'close_pct' => 0.5,
+        'trigger_rr' => 1.0,
+        'move_sl_to_breakeven' => true,
     ],
 
     // News-Filter
@@ -45,8 +48,19 @@ return [
     'entry_refinement' => [
         'enabled' => true,
         'timeframe' => 'M15',
-        'max_wait_candles' => 4, // Max 4 M15-Kerzen warten (1h)
-        'require_confirmation' => true, // M15-Kerze muss Richtung bestätigen
+        'max_wait_candles' => 4,
+        'require_confirmation' => true,
+    ],
+
+    // Session-Filter: Nur in liquiden Sessions handeln
+    'session_filter' => [
+        'enabled' => true,
+        'allowed_sessions' => ['london', 'overlap', 'newyork'],
+    ],
+
+    // H4-Trend Filter: Nie gegen den übergeordneten Trend handeln
+    'h4_trend_filter' => [
+        'enabled' => true,
     ],
 
     // Strategie-Einstellungen
@@ -60,10 +74,8 @@ return [
     'learning' => [
         'min_trades' => 10,
         'lookback_bars' => 200,
-
-        // Adaptive Parameter-Optimierung
         'adaptive_params' => true,
-        'optimization_interval_trades' => 20, // Nach je 20 Trades optimieren
+        'optimization_interval_trades' => 20,
     ],
 
     // Bot-Einstellungen
