@@ -40,14 +40,16 @@ class NewsFilter
      *
      * @return array{blocked: bool, reason: string|null}
      */
-    public function isBlocked(string $pair): array
+    public function isBlocked(string $pair, ?Carbon $at = null): array
     {
-        $now = Carbon::now('UTC');
+        $now = $at ?? Carbon::now('UTC');
 
-        // Externe News-Daten prüfen (gecached)
-        $externalBlock = $this->checkExternalNews($pair, $now);
-        if ($externalBlock['blocked']) {
-            return $externalBlock;
+        // Externe News-Daten prüfen (gecached) — nur im Live-Modus
+        if (! $at) {
+            $externalBlock = $this->checkExternalNews($pair, $now);
+            if ($externalBlock['blocked']) {
+                return $externalBlock;
+            }
         }
 
         // Statische wiederkehrende Events prüfen
