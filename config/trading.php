@@ -49,7 +49,7 @@ return [
         'enabled' => true,
         'timeframe' => 'M15',
         'max_wait_candles' => 4,
-        'require_confirmation' => true,
+        'require_confirmation' => false,
     ],
 
     // Session-Filter: Nur in liquiden Sessions handeln
@@ -65,7 +65,8 @@ return [
 
     // Strategie-Einstellungen
     'strategy' => [
-        'min_confluence' => 2,
+        'min_confluence' => 1,
+        'single_signal_min_confidence' => 0.7,
         'cooldown_after_losses' => 3,
         'min_score_to_trade' => 0.3,
     ],

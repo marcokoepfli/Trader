@@ -85,33 +85,43 @@ class StrategyAggregator
         $buySignals = array_filter($signals, fn ($s) => $s['signal']->direction === 'BUY');
         $sellSignals = array_filter($signals, fn ($s) => $s['signal']->direction === 'SELL');
 
-        // Korrelations-Widerspruch erkennen: BUY + SELL gleichzeitig = unsicherer Markt
-        if (count($buySignals) > 0 && count($sellSignals) > 0) {
+        // Korrelations-Widerspruch: Nur blockieren wenn Signale gleichmässig verteilt
+        $buyCount = count($buySignals);
+        $sellCount = count($sellSignals);
+
+        if ($buyCount > 0 && $sellCount > 0 && abs($buyCount - $sellCount) <= 1) {
             $log->info(sprintf(
                 '[SIGNAL] Widersprüchliche Signale — %d BUY vs %d SELL — übersprungen (unsicherer Markt)',
-                count($buySignals),
-                count($sellSignals),
+                $buyCount,
+                $sellCount,
             ));
 
             return null;
         }
 
         $minConfluence = config('trading.strategy.min_confluence');
+        $singleMinConfidence = config('trading.strategy.single_signal_min_confidence', 0.7);
 
-        // Beste Richtung wählen (mehr Confluence)
+        // Beste Richtung wählen (mehr Confluence oder starkes Einzelsignal)
         $bestGroup = null;
-        if (count($buySignals) >= $minConfluence) {
-            $bestGroup = $buySignals;
-        } elseif (count($sellSignals) >= $minConfluence) {
-            $bestGroup = $sellSignals;
+        if ($buyCount >= 2 || ($buyCount === 1 && $buySignals[array_key_first($buySignals)]['signal']->confidence >= $singleMinConfidence)) {
+            if ($buyCount > $sellCount) {
+                $bestGroup = $buySignals;
+            }
+        }
+        if (! $bestGroup && ($sellCount >= 2 || ($sellCount === 1 && $sellSignals[array_key_first($sellSignals)]['signal']->confidence >= $singleMinConfidence))) {
+            if ($sellCount > $buyCount || $buyCount === 0) {
+                $bestGroup = $sellSignals;
+            }
         }
 
         if (! $bestGroup) {
             $log->debug(sprintf(
-                '[SIGNAL] Keine Confluence — BUY: %d, SELL: %d (min: %d)',
-                count($buySignals),
-                count($sellSignals),
+                '[SIGNAL] Keine Confluence — BUY: %d, SELL: %d (min: %d oder Einzelsignal > %.0f%%)',
+                $buyCount,
+                $sellCount,
                 $minConfluence,
+                $singleMinConfidence * 100,
             ));
 
             return null;
@@ -176,17 +186,22 @@ class StrategyAggregator
         // Preis muss auf der richtigen Seite der H4 EMA50 sein
         $h4Close = $h4Indicators['ema_50']['value'] ?? null; // EMA als Referenz
 
-        // H4 EMA50 + SMA200 Ausrichtung prüfen
+        // H4 EMA50 + SMA200 Ausrichtung prüfen — nur bei deutlichem Gegentrend blockieren
         if ($h4Sma200) {
-            if ($direction === 'BUY' && $h4Ema50 < $h4Sma200) {
-                $log->info('[SIGNAL] H4-Trend Filter: BUY blockiert — EMA50 < SMA200 (Abwärtstrend)');
+            $divergence = abs($h4Ema50 - $h4Sma200) / $h4Sma200;
 
-                return false;
-            }
-            if ($direction === 'SELL' && $h4Ema50 > $h4Sma200) {
-                $log->info('[SIGNAL] H4-Trend Filter: SELL blockiert — EMA50 > SMA200 (Aufwärtstrend)');
+            // Nur blockieren wenn EMA50 und SMA200 deutlich auseinander liegen (>0.3%)
+            if ($divergence > 0.003) {
+                if ($direction === 'BUY' && $h4Ema50 < $h4Sma200) {
+                    $log->info(sprintf('[SIGNAL] H4-Trend Filter: BUY blockiert — EMA50 < SMA200 (%.2f%% Divergenz)', $divergence * 100));
 
-                return false;
+                    return false;
+                }
+                if ($direction === 'SELL' && $h4Ema50 > $h4Sma200) {
+                    $log->info(sprintf('[SIGNAL] H4-Trend Filter: SELL blockiert — EMA50 > SMA200 (%.2f%% Divergenz)', $divergence * 100));
+
+                    return false;
+                }
             }
         }
 

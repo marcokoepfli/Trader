@@ -34,17 +34,22 @@ class BotWarmupCommand extends Command
         $months = (int) $this->option('months');
 
         if ($this->option('reset')) {
-            if ($this->confirm('Alle bestehenden Strategy Scores, Regeln und Warmup-Trades löschen?')) {
+            if ($this->confirm('Alle bestehenden Strategy Scores, Regeln, Warmup-Trades und adaptive Parameter löschen?')) {
                 StrategyScore::query()->delete();
                 TradingRule::query()->where('source', 'auto')->delete();
                 Trade::query()->where('reasoning', 'LIKE', '%[warmup]%')->delete();
-                BotState::query()->whereIn('key', [
-                    'adaptive_sl_multiplier', 'adaptive_tp_multiplier',
-                ])->delete();
-                // Adaptive Keys pro Strategie löschen
-                BotState::query()->where('key', 'LIKE', 'adaptive_sl_multiplier_%')->delete();
+
+                // Alle adaptiven BotState-Keys löschen
+                BotState::query()->where('key', 'LIKE', 'adaptive_%')->delete();
                 BotState::query()->where('key', 'LIKE', 'best_session_%')->delete();
                 BotState::query()->where('key', 'LIKE', 'avoid_condition_%')->delete();
+                BotState::query()->whereIn('key', [
+                    'peak_balance',
+                    'is_paused',
+                    'pause_until',
+                    'pause_reason',
+                ])->delete();
+
                 $this->info('Bestehende Daten gelöscht.');
             }
         }

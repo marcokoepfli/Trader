@@ -1,16 +1,17 @@
 <?php
 
-use App\DTOs\SignalDTO;
 use App\Models\BotState;
 use App\Models\StrategyScore;
 use App\Models\Trade;
+use App\Services\Broker\OandaClient;
 use App\Services\LearningEngine;
 use App\Services\NewsFilter;
 use App\Services\RiskManager;
+use App\Services\Strategies\StrategyAggregator;
 use Illuminate\Support\Carbon;
 
 test('Dynamische Positionsgrösse skaliert mit Confidence', function () {
-    $broker = Mockery::mock(\App\Services\Broker\OandaClient::class);
+    $broker = Mockery::mock(OandaClient::class);
     $riskManager = new RiskManager($broker);
 
     $balance = 10000;
@@ -29,7 +30,7 @@ test('Dynamische Positionsgrösse skaliert mit Confidence', function () {
 });
 
 test('Dynamische Positionsgrösse ohne Confidence nutzt vollen Risikobetrag', function () {
-    $broker = Mockery::mock(\App\Services\Broker\OandaClient::class);
+    $broker = Mockery::mock(OandaClient::class);
     $riskManager = new RiskManager($broker);
 
     $balance = 10000;
@@ -127,7 +128,7 @@ test('LearningEngine optimizeAdaptiveParameters erstellt Adaptive Values', funct
 });
 
 test('Drawdown-Recovery reduziert Positionsgrösse', function () {
-    $broker = Mockery::mock(\App\Services\Broker\OandaClient::class);
+    $broker = Mockery::mock(OandaClient::class);
     $riskManager = new RiskManager($broker);
 
     $balance = 9000;
@@ -147,7 +148,7 @@ test('Drawdown-Recovery reduziert Positionsgrösse', function () {
 });
 
 test('Session-Filter blockiert Asian Session', function () {
-    $aggregator = new \App\Services\Strategies\StrategyAggregator;
+    $aggregator = new StrategyAggregator;
 
     // Candles mit Asian Session
     $candles = collect([
@@ -162,7 +163,7 @@ test('Session-Filter blockiert Asian Session', function () {
 test('StrategyAggregator blockiert widersprüchliche Signale', function () {
     // Dieser Test prüft dass bei BUY + SELL Signalen null zurückgegeben wird
     // (wird in der Logik des Aggregators geprüft)
-    $aggregator = new \App\Services\Strategies\StrategyAggregator;
+    $aggregator = new StrategyAggregator;
 
     $result = $aggregator->analyze([], collect([
         ['time' => now()->toIso8601String(), 'open' => 1.1, 'high' => 1.11, 'low' => 1.09, 'close' => 1.105, 'volume' => 100, 'session' => 'london'],
@@ -181,9 +182,12 @@ test('Config enthält alle neuen Optimierungs-Einstellungen', function () {
         ->and(config('trading.news_filter.enabled'))->toBeTrue()
         ->and(config('trading.entry_refinement.enabled'))->toBeTrue()
         ->and(config('trading.entry_refinement.timeframe'))->toBe('M15')
+        ->and(config('trading.entry_refinement.require_confirmation'))->toBeFalse()
         ->and(config('trading.learning.adaptive_params'))->toBeTrue()
         ->and(config('trading.refinement_timeframe'))->toBe('M15')
         ->and(config('trading.session_filter.enabled'))->toBeTrue()
         ->and(config('trading.session_filter.allowed_sessions'))->toBe(['london', 'overlap', 'newyork'])
-        ->and(config('trading.h4_trend_filter.enabled'))->toBeTrue();
+        ->and(config('trading.h4_trend_filter.enabled'))->toBeTrue()
+        ->and(config('trading.strategy.min_confluence'))->toBe(1)
+        ->and(config('trading.strategy.single_signal_min_confidence'))->toBe(0.7);
 });
