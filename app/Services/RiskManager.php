@@ -21,11 +21,34 @@ class RiskManager
     }
 
     /**
-     * Positionsgrösse berechnen basierend auf Risiko
+     * Positionsgrösse berechnen basierend auf Risiko und Confidence
      */
-    public function calculatePositionSize(float $balance, float $entry, float $sl): int
+    public function calculatePositionSize(float $balance, float $entry, float $sl, float $confidence = 1.0): int
     {
-        $riskAmount = $balance * config('trading.risk.max_per_trade');
+        $baseRisk = config('trading.risk.max_per_trade');
+
+        // Dynamische Positionsgrösse: Confidence skaliert das Risiko
+        if (config('trading.risk.dynamic_sizing')) {
+            $minPct = config('trading.risk.min_confidence_risk_pct');
+            $maxPct = config('trading.risk.max_confidence_risk_pct');
+            $lowThreshold = config('trading.risk.confidence_threshold_low');
+            $highThreshold = config('trading.risk.confidence_threshold_high');
+
+            // Linear interpolieren zwischen min und max basierend auf Confidence
+            $normalizedConfidence = max(0, min(1, ($confidence - $lowThreshold) / ($highThreshold - $lowThreshold)));
+            $riskMultiplier = $minPct + ($maxPct - $minPct) * $normalizedConfidence;
+
+            $baseRisk *= $riskMultiplier;
+
+            Log::channel('trading')->debug(sprintf(
+                '[RISK] Dynamische Grösse: Confidence %.2f → Risiko %.2f%% (Multiplier %.2f)',
+                $confidence,
+                $baseRisk * 100,
+                $riskMultiplier,
+            ));
+        }
+
+        $riskAmount = $balance * $baseRisk;
         $pipDistance = abs($entry - $sl);
 
         if ($pipDistance <= 0) {
@@ -99,6 +122,15 @@ class RiskManager
                         break;
                     }
                 }
+            }
+        }
+
+        // News-Filter prüfen
+        if (config('trading.news_filter.enabled')) {
+            $newsFilter = app(NewsFilter::class);
+            $newsCheck = $newsFilter->isBlocked($pair);
+            if ($newsCheck['blocked']) {
+                $failures[] = $newsCheck['reason'];
             }
         }
 

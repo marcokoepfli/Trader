@@ -55,6 +55,11 @@ class ManageOpenTradesJob implements ShouldQueue
                 $price = $broker->getCurrentPrice($trade->pair);
                 $currentPrice = $trade->direction === 'BUY' ? $price['bid'] : $price['ask'];
 
+                // Partial Take Profit prüfen
+                if (config('trading.partial_tp.enabled') && ! $trade->partial_close_done) {
+                    $this->checkPartialTakeProfit($trade, $currentPrice, $broker, $log);
+                }
+
                 // Trade managen (Trailing Stop etc.)
                 $riskManager->manageOpenTrade($trade, $currentPrice);
 
@@ -70,6 +75,63 @@ class ManageOpenTradesJob implements ShouldQueue
         $balance = (float) ($account['balance'] ?? 0);
         if ($balance > 0) {
             $riskManager->checkDrawdown($balance);
+        }
+    }
+
+    /**
+     * Partial Take Profit: 50% der Position bei 1:1 R:R schliessen
+     */
+    private function checkPartialTakeProfit(Trade $trade, float $currentPrice, OandaClient $broker, $log): void
+    {
+        $triggerRR = config('trading.partial_tp.trigger_rr', 1.0);
+        $closePct = config('trading.partial_tp.close_pct', 0.5);
+
+        $slDistance = abs($trade->entry_price - $trade->stop_loss);
+        $targetDistance = $slDistance * $triggerRR;
+
+        if ($slDistance <= 0) {
+            return;
+        }
+
+        // Prüfe ob der Preis das 1:1 R:R erreicht hat
+        $unrealized = $trade->direction === 'BUY'
+            ? $currentPrice - $trade->entry_price
+            : $trade->entry_price - $currentPrice;
+
+        if ($unrealized < $targetDistance) {
+            return;
+        }
+
+        // 50% der Position schliessen
+        $unitsToClose = (int) floor($trade->position_size * $closePct);
+        if ($unitsToClose <= 0) {
+            return;
+        }
+
+        try {
+            $response = $broker->partialCloseTrade($trade->oanda_trade_id, $unitsToClose);
+
+            if (! isset($response['error'])) {
+                $trade->update([
+                    'partial_close_done' => true,
+                    'position_size' => $trade->position_size - $unitsToClose,
+                ]);
+
+                // SL auf Breakeven (Einstandskurs) setzen
+                if (config('trading.partial_tp.move_sl_to_breakeven')) {
+                    $broker->modifyTrade($trade->oanda_trade_id, $trade->entry_price, null);
+                    $trade->update(['stop_loss' => $trade->entry_price]);
+                }
+
+                $log->info(sprintf(
+                    '[PARTIAL-TP] %s — %d Units geschlossen bei %.5f (50%% bei 1:1 R:R), SL → Breakeven',
+                    $trade->pair,
+                    $unitsToClose,
+                    $currentPrice,
+                ));
+            }
+        } catch (\Exception $e) {
+            $log->error("[PARTIAL-TP] Fehler bei {$trade->pair}: {$e->getMessage()}");
         }
     }
 

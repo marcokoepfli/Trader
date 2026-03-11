@@ -34,8 +34,8 @@ class TradeExecutor
             return null;
         }
 
-        // Positionsgrösse berechnen
-        $units = $this->riskManager->calculatePositionSize($balance, $signal->entryPrice, $signal->stopLoss);
+        // Positionsgrösse berechnen (mit Confidence für dynamische Grösse)
+        $units = $this->riskManager->calculatePositionSize($balance, $signal->entryPrice, $signal->stopLoss, $signal->confidence);
         if ($units <= 0) {
             $log->warning('[TRADE] Positionsgrösse = 0 — Trade übersprungen');
 
@@ -84,6 +84,7 @@ class TradeExecutor
             'stop_loss' => $signal->stopLoss,
             'take_profit' => $signal->takeProfit,
             'position_size' => $units,
+            'original_position_size' => $units,
             'result' => 'OPEN',
             'confluence_score' => $confluenceScore,
             'session' => $session,

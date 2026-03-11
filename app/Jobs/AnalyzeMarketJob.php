@@ -2,11 +2,13 @@
 
 namespace App\Jobs;
 
+use App\DTOs\SignalDTO;
 use App\Events\SignalGenerated;
 use App\Models\BotState;
 use App\Models\Signal;
 use App\Services\Broker\OandaClient;
 use App\Services\Indicators\IndicatorService;
+use App\Services\NewsFilter;
 use App\Services\RiskManager;
 use App\Services\Strategies\StrategyAggregator;
 use App\Services\TradeExecutor;
@@ -31,6 +33,7 @@ class AnalyzeMarketJob implements ShouldQueue
         StrategyAggregator $aggregator,
         RiskManager $riskManager,
         TradeExecutor $executor,
+        NewsFilter $newsFilter,
     ): void {
         $log = Log::channel('trading');
 
@@ -56,6 +59,16 @@ class AnalyzeMarketJob implements ShouldQueue
 
         foreach ($pairs as $pair) {
             try {
+                // News-Filter: Pair überspringen wenn High-Impact News anstehen
+                if (config('trading.news_filter.enabled')) {
+                    $newsCheck = $newsFilter->isBlocked($pair);
+                    if ($newsCheck['blocked']) {
+                        $log->info("[ANALYZE] {$pair} — Übersprungen: {$newsCheck['reason']}");
+
+                        continue;
+                    }
+                }
+
                 // Candlestick-Daten holen
                 $candles = $broker->getCandles($pair, $timeframe, $lookback);
                 $h4Candles = $broker->getCandles($pair, $higherTf, 100);
@@ -79,6 +92,16 @@ class AnalyzeMarketJob implements ShouldQueue
                 $signal = $aggregator->analyze($indicators, $candles, $h4Indicators);
 
                 if ($signal) {
+                    // M15 Entry Refinement: Besserer Einstieg auf kleinerem Timeframe
+                    if (config('trading.entry_refinement.enabled')) {
+                        $signal = $this->refineEntryM15($broker, $indicatorService, $signal, $pair, $log);
+                        if ($signal === null) {
+                            $log->debug("[ANALYZE] {$pair} — M15 Refinement: Kein bestätigender Einstieg");
+
+                            continue;
+                        }
+                    }
+
                     // Risk-Check
                     $riskCheck = $riskManager->checkPreTradeConditions($signal, $pair);
 
@@ -121,5 +144,92 @@ class AnalyzeMarketJob implements ShouldQueue
                 ]);
             }
         }
+    }
+
+    /**
+     * M15 Entry Refinement: Prüfe auf dem 15-Min-Chart ob ein besserer Einstieg möglich ist
+     */
+    private function refineEntryM15(
+        OandaClient $broker,
+        IndicatorService $indicatorService,
+        SignalDTO $signal,
+        string $pair,
+        $log,
+    ): ?SignalDTO {
+        $m15Candles = $broker->getCandles($pair, config('trading.entry_refinement.timeframe', 'M15'), 20);
+
+        if ($m15Candles->count() < 10) {
+            return $signal; // Nicht genug M15-Daten, H1-Signal verwenden
+        }
+
+        $lastCandle = $m15Candles->last();
+        $prevCandle = $m15Candles->slice(-2, 1)->first();
+
+        if (! $lastCandle || ! $prevCandle) {
+            return $signal;
+        }
+
+        // Prüfe ob die letzte M15-Kerze die Richtung bestätigt
+        if (config('trading.entry_refinement.require_confirmation')) {
+            $isBullishCandle = $lastCandle['close'] > $lastCandle['open'];
+            $isBearishCandle = $lastCandle['close'] < $lastCandle['open'];
+
+            if ($signal->direction === 'BUY' && ! $isBullishCandle) {
+                return null; // M15 bestätigt nicht — kein Entry
+            }
+
+            if ($signal->direction === 'SELL' && ! $isBearishCandle) {
+                return null; // M15 bestätigt nicht — kein Entry
+            }
+        }
+
+        // Besseren Entry-Preis vom M15 verwenden
+        $refinedEntry = $lastCandle['close'];
+
+        // Engeren SL basierend auf M15-Swing setzen
+        $recentLows = $m15Candles->slice(-5)->pluck('low');
+        $recentHighs = $m15Candles->slice(-5)->pluck('high');
+
+        if ($signal->direction === 'BUY') {
+            $swingLow = $recentLows->min();
+            $buffer = ($refinedEntry - $swingLow) * 0.1;
+            $refinedSl = $swingLow - $buffer;
+
+            // SL darf nicht weiter als der H1-SL sein (engerer SL = besseres R:R)
+            if ($refinedSl > $signal->stopLoss && $refinedSl < $refinedEntry) {
+                $log->debug(sprintf('[M15] %s BUY: SL verbessert %.5f → %.5f', $pair, $signal->stopLoss, $refinedSl));
+
+                return new SignalDTO(
+                    direction: $signal->direction,
+                    confidence: $signal->confidence,
+                    strategy: $signal->strategy,
+                    entryPrice: $refinedEntry,
+                    stopLoss: $refinedSl,
+                    takeProfit: $signal->takeProfit,
+                    reasoning: $signal->reasoning.' [M15 refined]',
+                );
+            }
+        } else {
+            $swingHigh = $recentHighs->max();
+            $buffer = ($swingHigh - $refinedEntry) * 0.1;
+            $refinedSl = $swingHigh + $buffer;
+
+            if ($refinedSl < $signal->stopLoss && $refinedSl > $refinedEntry) {
+                $log->debug(sprintf('[M15] %s SELL: SL verbessert %.5f → %.5f', $pair, $signal->stopLoss, $refinedSl));
+
+                return new SignalDTO(
+                    direction: $signal->direction,
+                    confidence: $signal->confidence,
+                    strategy: $signal->strategy,
+                    entryPrice: $refinedEntry,
+                    stopLoss: $refinedSl,
+                    takeProfit: $signal->takeProfit,
+                    reasoning: $signal->reasoning.' [M15 refined]',
+                );
+            }
+        }
+
+        // M15 bestätigt, aber kein besserer SL — Original-Signal verwenden
+        return $signal;
     }
 }

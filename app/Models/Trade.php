@@ -11,10 +11,10 @@ class Trade extends Model
 
     protected $fillable = [
         'oanda_trade_id', 'pair', 'direction', 'strategy', 'entry_price', 'exit_price',
-        'stop_loss', 'take_profit', 'position_size', 'pnl', 'pnl_pct', 'result',
+        'stop_loss', 'take_profit', 'position_size', 'original_position_size', 'pnl', 'pnl_pct', 'result',
         'confluence_score', 'session', 'market_condition', 'indicators_at_entry',
         'indicators_at_exit', 'max_favorable', 'max_adverse', 'hit_stop_loss',
-        'hit_take_profit', 'slippage', 'reasoning', 'exit_notes', 'opened_at', 'closed_at',
+        'hit_take_profit', 'partial_close_done', 'slippage', 'reasoning', 'exit_notes', 'opened_at', 'closed_at',
     ];
 
     protected function casts(): array
@@ -34,6 +34,7 @@ class Trade extends Model
             'slippage' => 'float',
             'hit_stop_loss' => 'boolean',
             'hit_take_profit' => 'boolean',
+            'partial_close_done' => 'boolean',
             'opened_at' => 'datetime',
             'closed_at' => 'datetime',
         ];

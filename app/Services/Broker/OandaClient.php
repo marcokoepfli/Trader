@@ -89,6 +89,16 @@ class OandaClient implements BrokerInterface
         return $this->request('PUT', "/v3/accounts/{$this->accountId}/trades/{$tradeId}/close");
     }
 
+    /**
+     * Teilposition schliessen (z.B. 50% bei Partial Take Profit)
+     */
+    public function partialCloseTrade(string $tradeId, int $units): array
+    {
+        return $this->request('PUT', "/v3/accounts/{$this->accountId}/trades/{$tradeId}/close", [], [
+            'units' => (string) abs($units),
+        ]);
+    }
+
     public function getOpenTrades(): Collection
     {
         $response = $this->request('GET', "/v3/accounts/{$this->accountId}/openTrades");

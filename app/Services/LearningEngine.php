@@ -34,6 +34,12 @@ class LearningEngine
             $this->analyzeFailurePatterns($trade->strategy);
         }
 
+        // Adaptive Parameter alle X Trades optimieren
+        $optimizationInterval = config('trading.learning.optimization_interval_trades', 20);
+        if ($totalTrades > 0 && $totalTrades % $optimizationInterval === 0) {
+            $this->optimizeAdaptiveParameters();
+        }
+
         $this->evaluateRules();
     }
 
@@ -350,6 +356,145 @@ class LearningEngine
 
             BotState::setValue('adaptive_tp_multiplier', (string) round($newMultiplier, 2));
             $this->log->info(sprintf('[LEARN] TP-Multiplier angepasst: %.2f → %.2f (%.0f%% verpasste TPs)', $currentMultiplier, $newMultiplier, $nearTpRatio * 100));
+        }
+    }
+
+    /**
+     * Adaptive Parameter-Optimierung pro Strategie und Pair
+     * Analysiert geschlossene Trades und passt Indikator-Perioden an
+     */
+    public function optimizeAdaptiveParameters(): void
+    {
+        if (! config('trading.learning.adaptive_params')) {
+            return;
+        }
+
+        $strategies = StrategyScore::all();
+
+        foreach ($strategies as $score) {
+            $trades = Trade::closed()
+                ->forStrategy($score->strategy)
+                ->latest('closed_at')
+                ->limit(30)
+                ->get();
+
+            if ($trades->count() < 10) {
+                continue;
+            }
+
+            // Analyse: Bei welchen ATR-Multipliern waren Trades profitabel?
+            $this->optimizeAtrMultiplier($score->strategy, $trades);
+
+            // Analyse: Optimale Marktbedingung pro Strategie
+            $this->optimizeMarketConditionPreference($score->strategy, $trades);
+
+            // Analyse: Optimale Session pro Strategie
+            $this->optimizeSessionPreference($score->strategy, $trades);
+        }
+    }
+
+    /**
+     * ATR-Multiplier optimieren basierend auf SL/TP-Effizienz
+     */
+    private function optimizeAtrMultiplier(string $strategy, $trades): void
+    {
+        $wins = $trades->where('result', 'WIN');
+        $losses = $trades->where('result', 'LOSS');
+
+        if ($wins->isEmpty() || $losses->isEmpty()) {
+            return;
+        }
+
+        // Durchschnittliche SL-Distanz bei Wins vs. Losses
+        $avgWinSlDistance = $wins->avg(fn ($t) => abs($t->entry_price - $t->stop_loss));
+        $avgLossSlDistance = $losses->avg(fn ($t) => abs($t->entry_price - $t->stop_loss));
+
+        if ($avgWinSlDistance <= 0 || $avgLossSlDistance <= 0) {
+            return;
+        }
+
+        // Wenn Losses im Schnitt engere SLs haben, SL etwas weiter setzen
+        $ratio = $avgLossSlDistance / $avgWinSlDistance;
+
+        $currentMultiplier = (float) BotState::getValue(
+            "adaptive_sl_multiplier_{$strategy}",
+            BotState::getValue('adaptive_sl_multiplier', config('trading.risk.atr_sl_multiplier')),
+        );
+
+        if ($ratio < 0.8) {
+            // Losses haben engere SLs — Multiplier erhöhen
+            $newMultiplier = min($currentMultiplier * 1.1, 3.0);
+            BotState::setValue("adaptive_sl_multiplier_{$strategy}", (string) round($newMultiplier, 2));
+            $this->log->info(sprintf('[ADAPT] %s SL-Multiplier: %.2f → %.2f (Losses zu eng)', $strategy, $currentMultiplier, $newMultiplier));
+        } elseif ($ratio > 1.3 && $currentMultiplier > 1.0) {
+            // Losses haben weitere SLs — Multiplier verringern
+            $newMultiplier = max($currentMultiplier * 0.9, 1.0);
+            BotState::setValue("adaptive_sl_multiplier_{$strategy}", (string) round($newMultiplier, 2));
+            $this->log->info(sprintf('[ADAPT] %s SL-Multiplier: %.2f → %.2f (Losses zu weit)', $strategy, $currentMultiplier, $newMultiplier));
+        }
+    }
+
+    /**
+     * Beste Marktbedingung pro Strategie identifizieren
+     */
+    private function optimizeMarketConditionPreference(string $strategy, $trades): void
+    {
+        $conditionStats = $trades->groupBy('market_condition')->map(function ($group) {
+            $wins = $group->where('result', 'WIN')->count();
+            $total = $group->count();
+
+            return [
+                'win_rate' => $total > 0 ? $wins / $total : 0,
+                'total' => $total,
+                'avg_pnl' => $group->avg('pnl'),
+            ];
+        });
+
+        // Beste und schlechteste Bedingung finden
+        $worst = $conditionStats->filter(fn ($s) => $s['total'] >= 3)->sortBy('win_rate')->first();
+        $worstCondition = $conditionStats->filter(fn ($s) => $s['total'] >= 3)->sortBy('win_rate')->keys()->first();
+
+        if ($worst && $worst['win_rate'] < 0.3 && $worst['total'] >= 5) {
+            $key = "avoid_condition_{$strategy}";
+            BotState::setValue($key, $worstCondition);
+            $this->log->info(sprintf(
+                '[ADAPT] %s vermeidet %s Markt (WR: %.0f%% bei %d Trades)',
+                $strategy,
+                $worstCondition,
+                $worst['win_rate'] * 100,
+                $worst['total'],
+            ));
+        }
+    }
+
+    /**
+     * Beste Session pro Strategie identifizieren
+     */
+    private function optimizeSessionPreference(string $strategy, $trades): void
+    {
+        $sessionStats = $trades->groupBy('session')->map(function ($group) {
+            $wins = $group->where('result', 'WIN')->count();
+            $total = $group->count();
+
+            return [
+                'win_rate' => $total > 0 ? $wins / $total : 0,
+                'total' => $total,
+                'avg_pnl' => $group->avg('pnl'),
+            ];
+        });
+
+        $best = $sessionStats->filter(fn ($s) => $s['total'] >= 3)->sortByDesc('win_rate')->first();
+        $bestSession = $sessionStats->filter(fn ($s) => $s['total'] >= 3)->sortByDesc('win_rate')->keys()->first();
+
+        if ($best && $best['win_rate'] > 0.65 && $best['total'] >= 5) {
+            BotState::setValue("best_session_{$strategy}", $bestSession);
+            $this->log->info(sprintf(
+                '[ADAPT] %s bevorzugt %s Session (WR: %.0f%% bei %d Trades)',
+                $strategy,
+                $bestSession,
+                $best['win_rate'] * 100,
+                $best['total'],
+            ));
         }
     }
 
