@@ -49,4 +49,9 @@
     <div class="mb-6">
         <livewire:trading.trade-log />
     </div>
+
+    {{-- Reports --}}
+    <div class="mb-6">
+        <livewire:trading.reports />
+    </div>
 </div>
