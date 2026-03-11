@@ -34,7 +34,7 @@ class BotWarmupCommand extends Command
         $months = (int) $this->option('months');
 
         if ($this->option('reset')) {
-            if ($this->confirm('Alle bestehenden Strategy Scores, Regeln, Warmup-Trades und adaptive Parameter löschen?')) {
+            if (! $this->input->isInteractive() || $this->confirm('Alle bestehenden Strategy Scores, Regeln, Warmup-Trades und adaptive Parameter löschen?')) {
                 StrategyScore::query()->delete();
                 TradingRule::query()->where('source', 'auto')->delete();
                 Trade::query()->where('reasoning', 'LIKE', '%[warmup]%')->delete();
